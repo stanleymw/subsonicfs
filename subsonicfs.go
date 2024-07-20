@@ -1,14 +1,18 @@
 package main
 
 import (
-	// "archive/zip"
+	//"bufio"
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
-	// "io"
+	"io"
+	"path"
+
 	"log"
 	"net/http"
 	"os"
+
 	// "sync"
 	"syscall"
 
@@ -17,56 +21,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// zipFile is a file read from a zip archive.
-//
-// // We decompress the file on demand in Open
-// var _ = (fs.NodeOpener)((*zipFile)(nil))
-//
-// // Getattr sets the minimum, which is the size. A more full-featured
-// // FS would also set timestamps and permissions.
-// var _ = (fs.NodeGetattrer)((*zipFile)(nil))
-//
-//	func (zf *zipFile) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-//		out.Size = zf.file.UncompressedSize64
-//		return 0
-//	}
-//
-// // Open lazily unpacks zip data
-//
-//	func (zf *zipFile) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-//		zf.mu.Lock()
-//		defer zf.mu.Unlock()
-//		if zf.data == nil {
-//			rc, err := zf.file.Open()
-//			if err != nil {
-//				return nil, 0, syscall.EIO
-//			}
-//			content, err := io.ReadAll(rc)
-//			if err != nil {
-//				return nil, 0, syscall.EIO
-//			}
-//
-//			zf.data = content
-//		}
-//
-//		// We don't return a filehandle since we don't really need
-//		// one.  The file content is immutable, so hint the kernel to
-//		// cache the data.
-//		return nil, fuse.FOPEN_KEEP_CACHE, fs.OK
-//	}
-//
-// // Read simply returns the data that was already unpacked in the Open call
-//
-//	func (zf *zipFile) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-//		end := int(off) + len(dest)
-//		if end > len(zf.data) {
-//			end = len(zf.data)
-//		}
-//		return fuse.ReadResultData(zf.data[off:end]), fs.OK
-//	}
-//
-// zipRoot is the root of the Zip filesystem. Its only functionality
-// is populating the filesystem.
 type subsonicFS struct {
 	fs.Inode
 
@@ -78,19 +32,81 @@ type subsonicAlbum struct {
 
 	album          *subsonic.Child
 	subsonicClient *subsonic.Client
+	pathToSong     map[string]*subsonic.Child
 }
 
 type subsonicSong struct {
 	fs.Inode
 
 	subsonicClient *subsonic.Client
+	songObj        *subsonic.Child
+	streamer       *io.Reader
+	dled           []byte
 }
 
 // The root populates the tree in its OnAdd method
 var _ = (fs.NodeOnAdder)((*subsonicFS)(nil))
 
+func (songf *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	log.Println("JUST TRIED TO OPEN!")
+	stmr, err := songf.subsonicClient.Stream(songf.songObj.ID, nil)
+	if err != nil {
+		return nil, 0, syscall.ENOENT
+	}
+
+	songf.streamer = &stmr
+	return songf, 0, 0
+}
+
+// TODO: create some reader/writerat new class -> so whenever an offset greater than the current cached data is read: we need to update this new class. essentially CACHE ALL THE READS TO THE CURRENT OFFSET!
+// idea: should not read the entire stream at once
+// instead, we need to maintain the current highest offset. If newOffset > internal high offset then further reading is required. Otherwise, the previously cached data can be returned (as the new offset sohuld be within the good range - already read data)
+func (songf *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	bufStreamer := *(songf.streamer)
+	if songf.dled == nil {
+		dl, err := io.ReadAll(bufStreamer)
+		log.Println("EXP READALL")
+		songf.dled = dl
+		if err != nil {
+			return fuse.ReadResultData(dest), syscall.ENOENT
+		}
+	}
+	nreader := bytes.NewReader(songf.dled)
+	nreader.ReadAt(dest, off)
+
+	//log.Printf("READING dest->%s | off->%s \n", dest, off)
+	return fuse.ReadResultData(dest), 0
+}
+
+func (songf *subsonicSong) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	sobj := songf.songObj
+	out.Ctime = uint64(sobj.Created.Unix())
+	out.Atime = uint64(sobj.Created.Unix())
+	out.Mtime = uint64(sobj.Created.Unix())
+	out.Mode = syscall.S_IFREG
+	out.Size = uint64(sobj.Size)
+
+	return 0
+}
+
 func (alb *subsonicAlbum) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	return fs.NewLoopbackDirStream("/")
+	album, err := alb.subsonicClient.GetAlbum(alb.album.ID)
+	if err != nil {
+		return nil, syscall.ENOENT
+	}
+
+	songs := []fuse.DirEntry{}
+	for _, song := range album.Song {
+		fmt.Printf("SONG ID: %s\n", song.ID)
+		//songs.append(song.Title)
+		songs = append(songs, fuse.DirEntry{
+			Mode: fuse.S_IFREG,
+			Name: path.Base(song.Path),
+		})
+		alb.pathToSong[path.Base(song.Path)] = song
+	}
+
+	return fs.NewListDirStream(songs), 0
 }
 
 // func (alb *subsonicAlbum) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -99,11 +115,24 @@ func (alb *subsonicAlbum) Readdir(ctx context.Context) (fs.DirStream, syscall.Er
 // }
 
 func (alb *subsonicAlbum) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Println("NODE LOOKED UP!!!")
-	out.Ctime = uint64(alb.album.Created.UnixMicro())
-	out.Atime = uint64(alb.album.Created.UnixMicro())
-	out.Mtime = uint64(alb.album.Created.UnixMicro())
-	return &alb.Inode, 0
+	val, ok := alb.pathToSong[name]
+	if ok {
+
+	} else {
+		return nil, syscall.ENOENT
+	}
+
+	log.Println("NODE FOUND!")
+
+	ssong := subsonicSong{subsonicClient: alb.subsonicClient, songObj: val}
+	out.Ctime = uint64(val.Created.Unix())
+	out.Atime = uint64(val.Created.Unix())
+	out.Mtime = uint64(val.Created.Unix())
+	out.Mode = syscall.S_IFREG
+	out.Size = uint64(val.Size)
+
+	log.Println("lookup FINISH!")
+	return alb.NewInode(ctx, &ssong, fs.StableAttr{Mode: syscall.S_IFREG}), 0
 }
 
 func (sr *subsonicFS) OnAdd(ctx context.Context) {
@@ -119,23 +148,6 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) {
 		// dir, base := filepath.Split(f.Name)
 
 		p := &sr.Inode
-		// for _, component := range strings.Split(dir, "/") {
-		// 	if len(component) == 0 {
-		// 		continue
-		// 	}
-		// 	ch := p.GetChild(component)
-		// 	if ch == nil {
-		// 		ch = p.NewPersistentInode(ctx, &fs.Inode{},
-		// 			fs.StableAttr{Mode: fuse.S_IFDIR})
-		// 		p.AddChild(component, ch, true)
-		// 	}
-		//
-		// 	p = ch
-		// }
-		//
-		// if f.FileInfo().IsDir() {
-		// 	continue
-		// }
 
 		// ch := p.NewPersistentInode(ctx, &fs.Inode{}, fs.StableAttr{Mode: fuse.S_IFDIR})
 		// p.AddChild(f.Title, ch, true)
@@ -143,13 +155,13 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) {
 
 		ch := p.NewPersistentInode(ctx,
 			&subsonicAlbum{album: f,
-				subsonicClient: sr.subsonicClient},
+				subsonicClient: sr.subsonicClient,
+				pathToSong:     map[string]*subsonic.Child{}},
 			fs.StableAttr{Mode: fuse.S_IFDIR})
 		p.AddChild(f.Title, ch, true)
 	}
 }
 
-// ExampleZipFS shows an in-memory, static file system
 func main() {
 	flag.Parse()
 	// if len(flag.Args()) != 1 {
@@ -202,9 +214,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// fmt.Println("zip file mounted")
-	// fmt.Printf("to unmount: fusermount -u %s\n", mnt)
 
 	fmt.Println("waiting...")
 	server.Wait()
