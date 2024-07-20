@@ -2,12 +2,14 @@ package main
 
 import (
 	//"bufio"
-	"bytes"
+	//"bytes"
 	"context"
 	"flag"
 	"fmt"
-	"io"
+	//"io"
 	"path"
+	"stanleymw/subsonicfs/readbuf"
+	"strings"
 
 	"log"
 	"net/http"
@@ -40,8 +42,9 @@ type subsonicSong struct {
 
 	subsonicClient *subsonic.Client
 	songObj        *subsonic.Child
-	streamer       *io.Reader
-	dled           []byte
+	streamer       *readbuf.ReaderBuf
+	// streamer *io.Reader
+	// dled     []byte
 }
 
 // The root populates the tree in its OnAdd method
@@ -54,7 +57,7 @@ func (songf *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandl
 		return nil, 0, syscall.ENOENT
 	}
 
-	songf.streamer = &stmr
+	songf.streamer = readbuf.NewReaderBuf(stmr, songf.songObj.Size)
 	return songf, 0, 0
 }
 
@@ -62,17 +65,21 @@ func (songf *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandl
 // idea: should not read the entire stream at once
 // instead, we need to maintain the current highest offset. If newOffset > internal high offset then further reading is required. Otherwise, the previously cached data can be returned (as the new offset sohuld be within the good range - already read data)
 func (songf *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	bufStreamer := *(songf.streamer)
-	if songf.dled == nil {
-		dl, err := io.ReadAll(bufStreamer)
-		log.Println("EXP READALL")
-		songf.dled = dl
-		if err != nil {
-			return fuse.ReadResultData(dest), syscall.ENOENT
-		}
-	}
-	nreader := bytes.NewReader(songf.dled)
-	nreader.ReadAt(dest, off)
+	// bufStreamer := *(songf.streamer)
+	// if songf.dled == nil {
+	// 	dl, err := io.ReadAll(bufStreamer)
+	//
+	// 	log.Println("EXP READALL")
+	//
+	// 	songf.dled = dl
+	// 	if err != nil {
+	// 		return fuse.ReadResultData(dest), syscall.ENOENT
+	// 	}
+	// }
+	// nreader := bytes.NewReader(songf.dled)
+	// nreader.ReadAt(dest, off)
+	bufReader := *(songf.streamer)
+	bufReader.ReadAt(dest, off)
 
 	//log.Printf("READING dest->%s | off->%s \n", dest, off)
 	return fuse.ReadResultData(dest), 0
@@ -171,9 +178,10 @@ func main() {
 	// if err != nil {
 	// 	log.Fatal(err)
 	// }
+	//
 	username := "user"
 	password := "user"
-	hostname := "http://127.0.0.1:4533"
+	hostname := "http://localhost:4533"
 
 	subsonicClient := subsonic.Client{
 		Client:       &http.Client{},
@@ -182,6 +190,13 @@ func main() {
 		ClientName:   "SubsonicFS",
 		PasswordAuth: false,
 	}
+
+	r := strings.NewReader("Hello, Reader!")
+	rb := readbuf.NewReaderBuf(r, 100)
+
+	var arr [50]byte
+	rb.ReadAt(arr[:], 3)
+	log.Println(arr)
 
 	subsonicClient.Authenticate(password)
 
