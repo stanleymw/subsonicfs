@@ -6,7 +6,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"slices"
+
 	//"io"
+	"hash/fnv"
 	"path"
 	"stanleymw/subsonicfs/readbuf"
 	"strings"
@@ -23,25 +26,33 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+var hasher = fnv.New64()
+
+func hash(s string) uint64 {
+	hasher.Reset()
+	hasher.Write([]byte(s))
+	return hasher.Sum64()
+}
+
 type subsonicFS struct {
 	fs.Inode
 
 	subsonicClient *subsonic.Client
 }
 
-type subsonicAlbum struct {
+// type subsonicAlbum struct {
+// 	fs.Inode
+//
+// 	album          *subsonic.Child
+// 	subsonicClient *subsonic.Client
+// 	pathToSong     map[string]*subsonic.Child
+// }
+
+type subsonicObj struct {
 	fs.Inode
 
-	album          *subsonic.Child
 	subsonicClient *subsonic.Client
-	pathToSong     map[string]*subsonic.Child
-}
-
-type subsonicSong struct {
-	fs.Inode
-
-	subsonicClient *subsonic.Client
-	songObj        *subsonic.Child
+	clientObj      *subsonic.Child
 	streamer       *readbuf.ReaderBuf
 	// streamer *io.Reader
 	// dled     []byte
@@ -50,21 +61,21 @@ type subsonicSong struct {
 // The root populates the tree in its OnAdd method
 var _ = (fs.NodeOnAdder)((*subsonicFS)(nil))
 
-func (songf *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+func (song *subsonicObj) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	log.Println("JUST TRIED TO OPEN!")
-	stmr, err := songf.subsonicClient.Stream(songf.songObj.ID, nil)
+	stmr, err := song.subsonicClient.Stream(song.clientObj.ID, nil)
 	if err != nil {
 		return nil, 0, syscall.ENOENT
 	}
 
-	songf.streamer = readbuf.NewReaderBuf(stmr, songf.songObj.Size)
-	return songf, 0, 0
+	song.streamer = readbuf.NewReaderBuf(stmr, song.clientObj.Size)
+	return song, 0, 0
 }
 
 // TODO: create some reader/writerat new class -> so whenever an offset greater than the current cached data is read: we need to update this new class. essentially CACHE ALL THE READS TO THE CURRENT OFFSET!
 // idea: should not read the entire stream at once
 // instead, we need to maintain the current highest offset. If newOffset > internal high offset then further reading is required. Otherwise, the previously cached data can be returned (as the new offset sohuld be within the good range - already read data)
-func (songf *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+func (song *subsonicObj) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	// bufStreamer := *(songf.streamer)
 	// if songf.dled == nil {
 	// 	dl, err := io.ReadAll(bufStreamer)
@@ -78,39 +89,46 @@ func (songf *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byt
 	// }
 	// nreader := bytes.NewReader(songf.dled)
 	// nreader.ReadAt(dest, off)
-	bufReader := *(songf.streamer)
+	bufReader := *(song.streamer)
 	bufReader.ReadAt(dest, off)
 
 	//log.Printf("READING dest->%s | off->%s \n", dest, off)
 	return fuse.ReadResultData(dest), 0
 }
 
-func (songf *subsonicSong) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	sobj := songf.songObj
+func (song *subsonicObj) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	sobj := song.clientObj
 	out.Ctime = uint64(sobj.Created.Unix())
 	out.Atime = uint64(sobj.Created.Unix())
 	out.Mtime = uint64(sobj.Created.Unix())
 	out.Mode = syscall.S_IFREG
 	out.Size = uint64(sobj.Size)
+	out.Ino = hash(sobj.ID)
 
 	return 0
 }
 
-func (alb *subsonicAlbum) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	album, err := alb.subsonicClient.GetAlbum(alb.album.ID)
+func (album *subsonicObj) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	if !album.clientObj.IsDir {
+		return nil, syscall.ENOTDIR
+	}
+
+	albumInfo, err := album.subsonicClient.GetAlbum(album.clientObj.ID)
+
 	if err != nil {
 		return nil, syscall.ENOENT
 	}
 
 	songs := []fuse.DirEntry{}
-	for _, song := range album.Song {
+	for _, song := range albumInfo.Song {
 		fmt.Printf("SONG ID: %s\n", song.ID)
 		//songs.append(song.Title)
 		songs = append(songs, fuse.DirEntry{
 			Mode: fuse.S_IFREG,
 			Name: path.Base(song.Path),
+			Ino:  hash(song.ID),
 		})
-		alb.pathToSong[path.Base(song.Path)] = song
+		// alb.pathToSong[path.Base(song.Path)] = song
 	}
 
 	return fs.NewListDirStream(songs), 0
@@ -121,29 +139,48 @@ func (alb *subsonicAlbum) Readdir(ctx context.Context) (fs.DirStream, syscall.Er
 // 	return 0
 // }
 
-func (alb *subsonicAlbum) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	val, ok := alb.pathToSong[name]
-	if ok {
+func (album *subsonicObj) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if !album.clientObj.IsDir {
+		return nil, syscall.ENOTDIR
+	}
 
-	} else {
+	albumInfo, err := album.subsonicClient.GetAlbum(album.clientObj.ID)
+	// val, ok := alb.pathToSong[name]
+	if err != nil {
 		return nil, syscall.ENOENT
 	}
 
+	song_idx := slices.IndexFunc(albumInfo.Song, func(s *subsonic.Child) bool { return path.Base(s.Path) == name })
+	// for _, song := range albumInfo.Song {
+	// 	if path.Base(song.Path) == name {
+	// 		found_song = subsonicObj{Inode: hash(song.ID), subsonicClient: album.subsonicClient, clientObj: song}
+	// 	}
+	// }
+
+	// if found_song {
+	// 	return nil, syscall.ENOENT
+	// }
+	if song_idx == -1 {
+		return nil, syscall.ENOENT
+	}
+	found_song := albumInfo.Song[song_idx]
+	ssong := subsonicObj{subsonicClient: album.subsonicClient, clientObj: found_song}
+
 	log.Println("NODE FOUND!")
 
-	ssong := subsonicSong{subsonicClient: alb.subsonicClient, songObj: val}
-	out.Ctime = uint64(val.Created.Unix())
-	out.Atime = uint64(val.Created.Unix())
-	out.Mtime = uint64(val.Created.Unix())
+	// ssong := subsonicSong{subsonicClient: alb.subsonicClient, songObj: val}
+	out.Ctime = uint64(found_song.Created.Unix())
+	out.Atime = uint64(found_song.Created.Unix())
+	out.Mtime = uint64(found_song.Created.Unix())
 	out.Mode = syscall.S_IFREG
-	out.Size = uint64(val.Size)
+	out.Size = uint64(found_song.Size)
+	out.Ino = hash(found_song.ID)
 
 	log.Println("lookup FINISH!")
-	return alb.NewInode(ctx, &ssong, fs.StableAttr{Mode: syscall.S_IFREG}), 0
+	return album.NewInode(ctx, &ssong, fs.StableAttr{Mode: syscall.S_IFREG, Ino: hash(found_song.ID)}), 0
 }
 
-func (sr *subsonicFS) OnAdd(ctx context.Context) {
-	// OnAdd is called once we are attached to an Inode. We can
+func (sr *subsonicFS) OnAdd(ctx context.Context) { // OnAdd is called once we are attached to an Inode. We can
 	//		// then construct a tree.  We construct the entire tree, and
 	//		// we don't want parts of the tree to disappear when the
 	//		// kernel is short on memory, so we use persistent inodes.
@@ -161,10 +198,9 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) {
 		log.Println(f)
 
 		ch := p.NewPersistentInode(ctx,
-			&subsonicAlbum{album: f,
-				subsonicClient: sr.subsonicClient,
-				pathToSong:     map[string]*subsonic.Child{}},
-			fs.StableAttr{Mode: fuse.S_IFDIR})
+			&subsonicObj{clientObj: f,
+				subsonicClient: sr.subsonicClient},
+			fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(f.ID)})
 		p.AddChild(f.Title, ch, true)
 	}
 }
