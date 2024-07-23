@@ -66,14 +66,13 @@ var _ = (fs.NodeOnAdder)((*subsonicFS)(nil))
 // var inode_object_map map[uint64]*subsonicObj
 
 func (song *subsonicObj) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	log.Printf("open(%s)@%p WITH streamer=%p called\n", song, song, song.streamer)
+	// log.Printf("open(%s)@%p WITH streamer=%p called\n", song, song, song.streamer)
 	if song.streamer != nil {
-		log.Println("reurning a used streamer")
+		// log.Println("reurning a used streamer")
 		return &song, fuse.FOPEN_DIRECT_IO, 0
 	}
 
-	log.Println("!!CREATING A NEW STREAMER!!!")
-
+	// log.Println("!!CREATING A NEW STREAMER!!!")
 	stmr, err := song.subsonicClient.Stream(song.clientObj.ID, nil)
 	if err != nil {
 		return nil, 0, syscall.ENOENT
@@ -83,11 +82,8 @@ func (song *subsonicObj) Open(ctx context.Context, flags uint32) (fs.FileHandle,
 	return &song, fuse.FOPEN_DIRECT_IO, 0
 }
 
-// TODO: create some reader/writerat new class -> so whenever an offset greater than the current cached data is read: we need to update this new class. essentially CACHE ALL THE READS TO THE CURRENT OFFSET!
-// idea: should not read the entire stream at once
-// instead, we need to maintain the current highest offset. If newOffset > internal high offset then further reading is required. Otherwise, the previously cached data can be returned (as the new offset sohuld be within the good range - already read data)
 func (song *subsonicObj) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	log.Printf("READ() song %s to dest=%s at off=%s", song, dest, off)
+	// log.Printf("!got READ() song %p at off=%d\n", song, off)
 	// bufStreamer := *(songf.streamer)
 	// if songf.dled == nil {
 	// 	dl, err := io.ReadAll(bufStreamer)
@@ -102,23 +98,20 @@ func (song *subsonicObj) Read(ctx context.Context, f fs.FileHandle, dest []byte,
 	// nreader := bytes.NewReader(songf.dled)
 	// nreader.ReadAt(dest, off)
 
-	bufReader := *(song.streamer)
+	// bufReader := *(song.streamer)
 	// bufReader.ReadAt(&dest, off)
 
-	log.Printf("[read] song addy: %p | streamer addy: %p\n", song, bufReader)
-
+	// log.Printf("[read] song addr: %p | streamer addr: %p\n", song, song.streamer)
 	readStart := off
-	readEnd := min(off+int64(len(dest)), int64(len(*bufReader.InternalCache)))
+	readEnd := min(off+int64(len(dest)), int64(len(*song.streamer.InternalCache)))
 
-	log.Printf("[read] PRE-ENSURE cache: %d\n", bufReader.ReadPosition)
-	bufReader.EnsureCached(readStart, readEnd)
-	log.Printf("[read] POST-ENSURE cache: %d\n", bufReader.ReadPosition)
-
-	temp := make([]byte, readEnd-readStart)
-	copy(temp, (*bufReader.InternalCache)[readStart:readEnd])
+	// log.Printf("read() start: %d, end: %d, DELTA: %d\n", readStart, readEnd, readEnd-readStart)
+	// log.Printf("[read] PRE-ENSURE cache: %d\n", bufReader.ReadPosition)
+	song.streamer.EnsureCached(readStart, readEnd)
+	// log.Printf("[read] POST-ENSURE cache: %d\n", bufReader.ReadPosition)
 
 	//log.Printf("READING dest->%s | off->%s \n", dest, off)
-	return fuse.ReadResultData(temp), 0
+	return fuse.ReadResultData((*song.streamer.InternalCache)[readStart:readEnd]), 0
 }
 
 func (song *subsonicObj) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -134,7 +127,7 @@ func (song *subsonicObj) Getattr(ctx context.Context, f fs.FileHandle, out *fuse
 }
 
 func (album *subsonicObj) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	log.Printf("[Readdir] readdir called by album: %s\n", album)
+	// log.Printf("[Readdir] readdir called by album: %s\n", album)
 	if !album.clientObj.IsDir {
 		return nil, syscall.ENOTDIR
 	}
@@ -147,7 +140,7 @@ func (album *subsonicObj) Readdir(ctx context.Context) (fs.DirStream, syscall.Er
 
 	songs := []fuse.DirEntry{}
 	for _, song := range albumInfo.Song {
-		fmt.Printf("SONG ID: %s\n", song.ID)
+		// fmt.Printf("SONG ID: %s\n", song.ID)
 		//songs.append(song.Title)
 		songs = append(songs, fuse.DirEntry{
 			Mode: fuse.S_IFREG,
@@ -169,7 +162,7 @@ func (album *subsonicObj) Readdir(ctx context.Context) (fs.DirStream, syscall.Er
 func (album *subsonicObj) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	val, ok := album.children[name]
 	if ok {
-		log.Println("[lookup]!!NEW returning already allocated inode")
+		// log.Println("[lookup]!!NEW returning already allocated inode")
 		return val, 0
 	}
 
@@ -199,7 +192,7 @@ func (album *subsonicObj) Lookup(ctx context.Context, name string, out *fuse.Ent
 	found_song := albumInfo.Song[song_idx]
 
 	ssong := &subsonicObj{subsonicClient: album.subsonicClient, clientObj: found_song}
-	log.Println("[lookup] !!!!!! NEW SUBSONIC SONG OBJECT ALLOCATED")
+	// log.Println("[lookup] !!!!!! NEW SUBSONIC SONG OBJECT ALLOCATED")
 	// log.Println("NODE FOUND!")
 
 	// ssong := subsonicSong{subsonicClient: alb.subsonicClient, songObj: val}

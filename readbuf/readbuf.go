@@ -1,10 +1,7 @@
 package readbuf
 
 import (
-	// "bufio"
-	// "bytes"
 	"io"
-	"log"
 )
 
 type ReaderBuf struct {
@@ -15,13 +12,13 @@ type ReaderBuf struct {
 }
 
 func NewReaderBufWithPreallocatedCache(ir *io.Reader, cache *[]byte) *ReaderBuf {
-	return &ReaderBuf{Reader: ir, ReadPosition: 0, InternalCache: cache}
+	return &ReaderBuf{Reader: ir, InternalCache: cache, ReadPosition: 0}
 }
 
 func NewReaderBuf(ir *io.Reader, cacheSize int64) *ReaderBuf {
 	// var cache [cacheSize]byte
 	cache := make([]byte, cacheSize) // len(a)=5
-	return &ReaderBuf{Reader: ir, ReadPosition: 0, InternalCache: &cache}
+	return &ReaderBuf{Reader: ir, InternalCache: &cache, ReadPosition: 0}
 }
 
 func (rb *ReaderBuf) EnsureCached(readStart int64, readEnd int64) (n int, err error) {
@@ -29,21 +26,22 @@ func (rb *ReaderBuf) EnsureCached(readStart int64, readEnd int64) (n int, err er
 		// not cached || partially cached
 
 		// cache up all the way to where we want
-		amt, _ := (*(rb.Reader)).Read((*(rb.InternalCache))[rb.ReadPosition:readEnd])
-		(*rb).ReadPosition += int64(amt)
-		log.Printf("[ec] readPosition += %d\n", amt)
+		var amt int
+		for rb.ReadPosition < readEnd {
+			temp_amt, _ := (*rb.Reader).Read((*rb.InternalCache)[rb.ReadPosition:readEnd])
 
+			amt += temp_amt
+			rb.ReadPosition += int64(temp_amt)
+		}
 		// if err != nil {
 		// 	fmt.Println(amt, err)
 		// 	return amt, err
 		// }
 		// ok then lets read from the cache
 
-		log.Printf("[ec] rb.readPosition = %d\n", rb.ReadPosition)
 		return amt, nil
 	} else {
 		//fully cached
-		log.Printf("[ec] rb.readPosition = %d\n", rb.ReadPosition)
 		return int(readEnd) - int(readStart), nil
 	}
 
