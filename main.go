@@ -12,7 +12,7 @@ import (
 	"hash/fnv"
 	"path"
 	"stanleymw/subsonicfs/readbuf"
-	"strings"
+	// "strings"
 
 	"log"
 	"net/http"
@@ -53,7 +53,9 @@ type subsonicObj struct {
 
 	subsonicClient *subsonic.Client
 	clientObj      *subsonic.Child
-	streamer       *readbuf.ReaderBuf
+
+	streamer *readbuf.ReaderBuf
+	children map[string]*fs.Inode
 	// streamer *io.Reader
 	// dled     []byte
 }
@@ -61,21 +63,31 @@ type subsonicObj struct {
 // The root populates the tree in its OnAdd method
 var _ = (fs.NodeOnAdder)((*subsonicFS)(nil))
 
+// var inode_object_map map[uint64]*subsonicObj
+
 func (song *subsonicObj) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	log.Println("JUST TRIED TO OPEN!")
+	log.Printf("open(%s)@%p WITH streamer=%p called\n", song, song, song.streamer)
+	if song.streamer != nil {
+		log.Println("reurning a used streamer")
+		return &song, fuse.FOPEN_DIRECT_IO, 0
+	}
+
+	log.Println("!!CREATING A NEW STREAMER!!!")
+
 	stmr, err := song.subsonicClient.Stream(song.clientObj.ID, nil)
 	if err != nil {
 		return nil, 0, syscall.ENOENT
 	}
 
-	song.streamer = readbuf.NewReaderBuf(stmr, song.clientObj.Size)
-	return song, 0, 0
+	song.streamer = readbuf.NewReaderBuf(&stmr, song.clientObj.Size)
+	return &song, fuse.FOPEN_DIRECT_IO, 0
 }
 
 // TODO: create some reader/writerat new class -> so whenever an offset greater than the current cached data is read: we need to update this new class. essentially CACHE ALL THE READS TO THE CURRENT OFFSET!
 // idea: should not read the entire stream at once
 // instead, we need to maintain the current highest offset. If newOffset > internal high offset then further reading is required. Otherwise, the previously cached data can be returned (as the new offset sohuld be within the good range - already read data)
 func (song *subsonicObj) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	log.Printf("READ() song %s to dest=%s at off=%s", song, dest, off)
 	// bufStreamer := *(songf.streamer)
 	// if songf.dled == nil {
 	// 	dl, err := io.ReadAll(bufStreamer)
@@ -89,11 +101,24 @@ func (song *subsonicObj) Read(ctx context.Context, f fs.FileHandle, dest []byte,
 	// }
 	// nreader := bytes.NewReader(songf.dled)
 	// nreader.ReadAt(dest, off)
+
 	bufReader := *(song.streamer)
-	bufReader.ReadAt(dest, off)
+	// bufReader.ReadAt(&dest, off)
+
+	log.Printf("[read] song addy: %p | streamer addy: %p\n", song, bufReader)
+
+	readStart := off
+	readEnd := min(off+int64(len(dest)), int64(len(*bufReader.InternalCache)))
+
+	log.Printf("[read] PRE-ENSURE cache: %d\n", bufReader.ReadPosition)
+	bufReader.EnsureCached(readStart, readEnd)
+	log.Printf("[read] POST-ENSURE cache: %d\n", bufReader.ReadPosition)
+
+	temp := make([]byte, readEnd-readStart)
+	copy(temp, (*bufReader.InternalCache)[readStart:readEnd])
 
 	//log.Printf("READING dest->%s | off->%s \n", dest, off)
-	return fuse.ReadResultData(dest), 0
+	return fuse.ReadResultData(temp), 0
 }
 
 func (song *subsonicObj) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -109,6 +134,7 @@ func (song *subsonicObj) Getattr(ctx context.Context, f fs.FileHandle, out *fuse
 }
 
 func (album *subsonicObj) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	log.Printf("[Readdir] readdir called by album: %s\n", album)
 	if !album.clientObj.IsDir {
 		return nil, syscall.ENOTDIR
 	}
@@ -128,6 +154,7 @@ func (album *subsonicObj) Readdir(ctx context.Context) (fs.DirStream, syscall.Er
 			Name: path.Base(song.Path),
 			Ino:  hash(song.ID),
 		})
+		// album.children[path.Base(song.Path)] = hash(song.ID)
 		// alb.pathToSong[path.Base(song.Path)] = song
 	}
 
@@ -140,6 +167,12 @@ func (album *subsonicObj) Readdir(ctx context.Context) (fs.DirStream, syscall.Er
 // }
 
 func (album *subsonicObj) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	val, ok := album.children[name]
+	if ok {
+		log.Println("[lookup]!!NEW returning already allocated inode")
+		return val, 0
+	}
+
 	if !album.clientObj.IsDir {
 		return nil, syscall.ENOTDIR
 	}
@@ -164,9 +197,10 @@ func (album *subsonicObj) Lookup(ctx context.Context, name string, out *fuse.Ent
 		return nil, syscall.ENOENT
 	}
 	found_song := albumInfo.Song[song_idx]
-	ssong := subsonicObj{subsonicClient: album.subsonicClient, clientObj: found_song}
 
-	log.Println("NODE FOUND!")
+	ssong := &subsonicObj{subsonicClient: album.subsonicClient, clientObj: found_song}
+	log.Println("[lookup] !!!!!! NEW SUBSONIC SONG OBJECT ALLOCATED")
+	// log.Println("NODE FOUND!")
 
 	// ssong := subsonicSong{subsonicClient: alb.subsonicClient, songObj: val}
 	out.Ctime = uint64(found_song.Created.Unix())
@@ -176,8 +210,12 @@ func (album *subsonicObj) Lookup(ctx context.Context, name string, out *fuse.Ent
 	out.Size = uint64(found_song.Size)
 	out.Ino = hash(found_song.ID)
 
-	log.Println("lookup FINISH!")
-	return album.NewInode(ctx, &ssong, fs.StableAttr{Mode: syscall.S_IFREG, Ino: hash(found_song.ID)}), 0
+	// log.Println("lookup FINISH!")
+	in := album.NewPersistentInode(ctx, ssong, fs.StableAttr{Mode: syscall.S_IFREG, Ino: hash(found_song.ID)})
+
+	album.children[name] = in
+	album.AddChild(name, in, false)
+	return in, 0
 }
 
 func (sr *subsonicFS) OnAdd(ctx context.Context) { // OnAdd is called once we are attached to an Inode. We can
@@ -199,7 +237,7 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) { // OnAdd is called once we ar
 
 		ch := p.NewPersistentInode(ctx,
 			&subsonicObj{clientObj: f,
-				subsonicClient: sr.subsonicClient},
+				subsonicClient: sr.subsonicClient, children: map[string]*fs.Inode{}},
 			fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(f.ID)})
 		p.AddChild(f.Title, ch, true)
 	}
@@ -227,12 +265,12 @@ func main() {
 		PasswordAuth: false,
 	}
 
-	r := strings.NewReader("Hello, Reader!")
-	rb := readbuf.NewReaderBuf(r, 100)
-
-	var arr [50]byte
-	rb.ReadAt(arr[:], 3)
-	log.Println(arr)
+	// r := strings.NewReader("Hello, Reader!")
+	// rb := readbuf.NewReaderBuf(r, 100)
+	//
+	// var arr [50]byte
+	// rb.ReadAt(arr[:], 3)
+	// log.Println(arr)
 
 	subsonicClient.Authenticate(password)
 
@@ -260,7 +298,7 @@ func main() {
 
 	fmt.Println("mounting...")
 	server, err := fs.Mount(mnt, root, &fs.Options{
-		MountOptions: fuse.MountOptions{Debug: true},
+		MountOptions: fuse.MountOptions{Debug: false},
 	})
 	if err != nil {
 		log.Fatal(err)
