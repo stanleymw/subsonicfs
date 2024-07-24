@@ -22,6 +22,10 @@ func NewReaderBuf(ir *io.Reader, cacheSize int64) *ReaderBuf {
 }
 
 func (rb *ReaderBuf) EnsureCached(readStart int64, readEnd int64) (n int, err error) {
+	// if rb.ReadPosition >= int64(len(*rb.InternalCache)) {
+	// 	(rb.Reader).Close()
+	// }
+
 	if readEnd >= rb.ReadPosition {
 		// not cached || partially cached
 
@@ -32,6 +36,7 @@ func (rb *ReaderBuf) EnsureCached(readStart int64, readEnd int64) (n int, err er
 
 			amt += temp_amt
 			rb.ReadPosition += int64(temp_amt)
+			// log.Printf("[ec] read %d bytes | new readpos: %d\n", temp_amt, rb.ReadPosition)
 		}
 		// if err != nil {
 		// 	fmt.Println(amt, err)

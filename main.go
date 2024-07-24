@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"path"
 	"stanleymw/subsonicfs/readbuf"
+
 	// "strings"
 
 	"log"
@@ -204,7 +205,7 @@ func (album *subsonicObj) Lookup(ctx context.Context, name string, out *fuse.Ent
 	out.Ino = hash(found_song.ID)
 
 	// log.Println("lookup FINISH!")
-	in := album.NewPersistentInode(ctx, ssong, fs.StableAttr{Mode: syscall.S_IFREG, Ino: hash(found_song.ID)})
+	in := album.NewInode(ctx, ssong, fs.StableAttr{Mode: syscall.S_IFREG, Ino: hash(found_song.ID)})
 
 	album.children[name] = in
 	album.AddChild(name, in, false)
