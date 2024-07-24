@@ -190,32 +190,36 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) {
 }
 
 func main() {
-	flag.Parse()
-	// if len(flag.Args()) != 1 {
-	// 	log.Fatal("usage: subsonicfs HOST USERNAME PASSWORD")
-	// }
+	hostname := flag.String("hostname", "http://127.0.0.1:4533", "Hostname/IP Address of the Subsonic Server")
+	username := flag.String("username", "user", "Username for the account")
+	password := flag.String("password", "user", "Password for the account")
+	mountDir := flag.String("mountDir", "/tmp/SubsonicFS", "Location to mount SubsonicFS")
+	passwordAuth := flag.Bool("passwordAuth", false, "Whether or not to use plain-text password authentication (Default is off as it is insecure)")
 
-	username := "user"
-	password := "user"
-	hostname := "http://localhost:4533"
+	flag.Parse()
 
 	SubsonicClient = subsonic.Client{
 		Client:       &http.Client{},
-		BaseUrl:      hostname,
-		User:         username,
+		BaseUrl:      *hostname,
+		User:         *username,
 		ClientName:   "SubsonicFS",
-		PasswordAuth: false,
+		PasswordAuth: *passwordAuth,
 	}
 
-	SubsonicClient.Authenticate(password)
+	err := SubsonicClient.Authenticate(*password)
+	if err != nil {
+		log.Fatalf("Authentication failed! Check your username and password\n%s", err)
+		return
+	}
 
 	root := &subsonicFS{}
 
-	mnt := "/tmp/x"
-	os.Mkdir(mnt, 0755)
+	os.Mkdir(*mountDir, 0755)
 
-	log.Println("Mounting...")
-	server, err := fs.Mount(mnt, root, &fs.Options{
+	log.Printf("Logged in as: %s", SubsonicClient.User)
+
+	log.Printf("Mounting at %s...", *mountDir)
+	server, err := fs.Mount(*mountDir, root, &fs.Options{
 		MountOptions: fuse.MountOptions{Debug: false},
 	})
 
