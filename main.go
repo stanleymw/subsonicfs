@@ -5,13 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path"
+	"sync"
 	"syscall"
-
-	"stanleymw/subsonicfs/readbuf"
 
 	"github.com/dweymouth/go-subsonic/subsonic"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -47,7 +47,8 @@ type subsonicSong struct {
 	fs.Inode
 
 	clientObj *subsonic.Child
-	streamer  *readbuf.ReaderBuf
+	streamer  io.Reader
+	readLock  sync.Mutex
 }
 
 // The root populates the tree in its OnAdd method
@@ -55,7 +56,7 @@ var _ = (fs.NodeOnAdder)((*subsonicFS)(nil))
 
 func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if song.streamer != nil {
-		return &song, fuse.FOPEN_DIRECT_IO, 0
+		return &song, fuse.FOPEN_NONSEEKABLE | fuse.FOPEN_KEEP_CACHE, 0
 	}
 
 	stmr, err := SubsonicClient.Stream(song.clientObj.ID, nil)
@@ -63,20 +64,44 @@ func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle
 		return nil, 0, syscall.ENOENT
 	}
 
-	song.streamer = readbuf.NewReaderBuf(&stmr, song.clientObj.Size)
-	return &song, fuse.FOPEN_DIRECT_IO, 0
+	song.readLock.Lock()
+	song.streamer = stmr
+	song.readLock.Unlock()
+
+	return &song, fuse.FOPEN_NONSEEKABLE | fuse.FOPEN_KEEP_CACHE, 0
 }
+
+var last int64
 
 func (song *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	readStart := off
-	readEnd := min(off+int64(len(dest)), int64(len(*song.streamer.InternalCache)))
+	song.readLock.Lock()
+	if song.streamer == nil {
+		song.readLock.Unlock()
+		return nil, syscall.EIO
+	}
 
-	song.streamer.EnsureCached(readStart, readEnd)
+	// log.Printf("[read] offset: %d | amt: %d | delta: %d", off, len(dest), off-last)
+	last = off
 
-	return fuse.ReadResultData((*song.streamer.InternalCache)[readStart:readEnd]), 0
+	readAmt := min(off+int64(len(dest)), song.clientObj.Size) - off
+
+	var rd int64 = 0
+
+	for rd < readAmt {
+		tmp, _ := song.streamer.Read(dest[rd:readAmt])
+
+		rd += int64(tmp)
+		// log.Printf("+%d -> %d %s", tmp, rd, err)
+	}
+
+	song.readLock.Unlock()
+	return fuse.ReadResultData(dest), 0
 }
 func (song *subsonicSong) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
+	song.readLock.Lock()
 	song.streamer = nil
+	song.readLock.Unlock()
+
 	return 0
 }
 func (song *subsonicSong) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -205,7 +230,7 @@ func main() {
 	hostname := flag.String("hostname", "http://127.0.0.1:4533", "Hostname/IP Address of the Subsonic Server")
 	username := flag.String("username", "user", "Username for the account")
 	password := flag.String("password", "user", "Password for the account")
-	mountDir := flag.String("mountDir", "/tmp/SubsonicFS", "Location to mount SubsonicFS")
+	mountDir := flag.String("mountDir", "/tmp/x", "Location to mount SubsonicFS")
 	passwordAuth := flag.Bool("passwordAuth", false, "Whether or not to use plain-text password authentication (Default is off as it is insecure)")
 
 	flag.Parse()
