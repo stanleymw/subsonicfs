@@ -31,6 +31,12 @@ type subsonicFS struct {
 	fs.Inode
 }
 
+type subsonicArtist struct {
+	fs.Inode
+
+	clientObj *subsonic.ArtistID3
+}
+
 type subsonicAlbum struct {
 	fs.Inode
 
@@ -100,6 +106,7 @@ func (album *subsonicAlbum) Getattr(ctx context.Context, f fs.FileHandle, out *f
 	return 0
 }
 
+// Album -> Song (dynamic discovery)
 func (album *subsonicAlbum) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// if we havent already discovered it yet
 	if len(album.Children()) == 0 {
@@ -116,27 +123,48 @@ func (album *subsonicAlbum) Readdir(ctx context.Context) (fs.DirStream, syscall.
 		}
 	}
 
-	// log.Printf("[Readdir] readdir called by album: %s\n", album)
 	songs := []fuse.DirEntry{}
 	for name, ino := range album.Children() {
-		// fmt.Printf("SONG ID: %s\n", song.ID)
-		//songs.append(song.Title)
 		songs = append(songs, fuse.DirEntry{
 			Mode: fuse.S_IFREG,
 			Name: name,
 			Ino:  ino.StableAttr().Ino,
 		})
-		// album.children[path.Base(song.Path)] = hash(song.ID)
-		// alb.pathToSong[path.Base(song.Path)] = song
 	}
 
 	return fs.NewListDirStream(songs), 0
 }
 
-// func (alb *subsonicAlbum) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-// 	out.Ctime = uint64(alb.album.Created.UnixMicro())
-// 	return 0
-// }
+// Artist -> Album (Dynamic discovery)
+func (artist *subsonicArtist) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	// if we havent already discovered it yet
+	if len(artist.Children()) == 0 {
+		art2, _ := SubsonicClient.GetArtist(artist.clientObj.ID)
+		for _, album := range art2.Album {
+			// dir, base := filepath.Split(f.Name)
+			// ch := p.NewPersistentInode(ctx, &fs.Inode{}, fs.StableAttr{Mode: fuse.S_IFDIR})
+			// p.AddChild(f.Title, ch, true)
+			albumInode := artist.NewPersistentInode(
+				ctx,
+				&subsonicAlbum{
+					clientObj: album,
+				},
+				fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(album.ID)})
+			artist.AddChild(fmt.Sprint(album.Name, " (", album.Year, ")"), albumInode, true)
+		}
+	}
+
+	songs := []fuse.DirEntry{}
+	for name, ino := range artist.Children() {
+		songs = append(songs, fuse.DirEntry{
+			Mode: fuse.S_IFDIR,
+			Name: name,
+			Ino:  ino.StableAttr().Ino,
+		})
+	}
+
+	return fs.NewListDirStream(songs), 0
+}
 
 func (album *subsonicSong) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	chil := album.GetChild(name)
@@ -158,35 +186,19 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) {
 		log.Fatal("Fatal error! Could not get artists")
 		return
 	}
-	log.Println("Discovering albums...")
+
 	for _, idx := range artists.Index {
 		for _, artist := range idx.Artist {
 			artistInode := p.NewPersistentInode(
 				ctx,
-				&fs.Inode{},
+				&subsonicArtist{
+					clientObj: artist,
+				},
 				fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(artist.ID)})
 			p.AddChild(artist.Name, artistInode, true)
-
-			// log.Printf("just got artist %s | albums: %s\n", artist.Name, artist.Album)
-
-			// subsonic doesnt return album data within the artist call
-			art2, _ := SubsonicClient.GetArtist(artist.ID)
-			for _, album := range art2.Album {
-				// dir, base := filepath.Split(f.Name)
-				// ch := p.NewPersistentInode(ctx, &fs.Inode{}, fs.StableAttr{Mode: fuse.S_IFDIR})
-				// p.AddChild(f.Title, ch, true)
-
-				albumInode := artistInode.NewPersistentInode(
-					ctx,
-					&subsonicAlbum{
-						clientObj: album,
-					},
-					fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(album.ID)})
-				artistInode.AddChild(fmt.Sprint(album.Name, " (", album.Year, ")"), albumInode, true)
-			}
 		}
 	}
-	log.Println("Artists and albums successfully indexed!")
+	log.Println("Artists successfully indexed!")
 }
 
 func main() {
@@ -199,11 +211,12 @@ func main() {
 	flag.Parse()
 
 	SubsonicClient = subsonic.Client{
-		Client:       &http.Client{},
-		BaseUrl:      *hostname,
-		User:         *username,
-		ClientName:   "SubsonicFS",
-		PasswordAuth: *passwordAuth,
+		Client:              &http.Client{},
+		BaseUrl:             *hostname,
+		User:                *username,
+		ClientName:          "SubsonicFS",
+		PasswordAuth:        *passwordAuth,
+		RequestedAPIVersion: "1.16.1",
 	}
 
 	err := SubsonicClient.Authenticate(*password)
