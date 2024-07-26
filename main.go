@@ -230,7 +230,7 @@ func main() {
 	hostname := flag.String("hostname", "http://127.0.0.1:4533", "Hostname/IP Address of the Subsonic Server")
 	username := flag.String("username", "user", "Username for the account")
 	password := flag.String("password", "user", "Password for the account")
-	mountDir := flag.String("mountDir", "/tmp/SubsonicFS", "Location to mount SubsonicFS")
+	mountDir := flag.String("mountDir", "/tmp/x", "Location to mount SubsonicFS")
 	passwordAuth := flag.Bool("passwordAuth", false, "Whether or not to use plain-text password authentication (Default is off as it is insecure)")
 
 	flag.Parse()
