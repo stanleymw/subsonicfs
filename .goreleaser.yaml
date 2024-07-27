@@ -1,6 +1,6 @@
 version: 2
 
 builds:
-    goos:
-      - linux
-      - darwin
+    - goos:
+        - linux
+        - darwin
