@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"sync"
 	"syscall"
 
 	"github.com/dweymouth/go-subsonic/subsonic"
@@ -48,7 +47,6 @@ type subsonicSong struct {
 
 	clientObj *subsonic.Child
 	streamer  io.Reader
-	readLock  sync.Mutex
 }
 
 // The root populates the tree in its OnAdd method
@@ -64,33 +62,22 @@ func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle
 		return nil, 0, syscall.ENOENT
 	}
 
-	song.readLock.Lock()
 	song.streamer = stmr
-	song.readLock.Unlock()
-
 	return &song, fuse.FOPEN_NONSEEKABLE, 0
 }
 
 var last int64
 
 func (song *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	song.readLock.Lock()
-	defer song.readLock.Unlock()
-
 	if song.streamer == nil {
 		return nil, syscall.EIO
 	}
-
-	// log.Printf("[read] offset: %d | amt: %d | delta: %d", off, len(dest), off-last)
-	// last = off
 
 	io.ReadFull(song.streamer, dest)
 	return fuse.ReadResultData(dest), 0
 }
 func (song *subsonicSong) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
-	song.readLock.Lock()
 	song.streamer = nil
-	song.readLock.Unlock()
 
 	return 0
 }
@@ -248,7 +235,7 @@ func main() {
 
 	log.Printf("Mounting at %s...", *mountDir)
 	server, err := fs.Mount(*mountDir, root, &fs.Options{
-		MountOptions: fuse.MountOptions{Debug: false},
+		MountOptions: fuse.MountOptions{Debug: false, SyncRead: true},
 	})
 
 	if err != nil {
