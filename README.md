@@ -7,7 +7,7 @@ Usage of subsonicfs:
   -hostname string
     	Hostname/IP Address of the Subsonic Server (default "http://127.0.0.1:4533")
   -mountDir string
-    	Location to mount SubsonicFS (default "/tmp/x")
+    	Location to mount SubsonicFS (default "/tmp/SubsonicFS")
   -password string
     	Password for the account (default "user")
   -passwordAuth
@@ -17,7 +17,7 @@ Usage of subsonicfs:
 ```
 Example:
 ```bash
-$ ./subsonicfs -hostname http://127.0.0.1:4533 -mountDir /tmp/SubsonicFS -username demo -password demo
+$ ./subsonicfs -hostname http://127.0.0.1:4533 -mountDir /home/demo/Music/Subsonic -username demo -password demo
 ```
 
 ## Libraries Used
