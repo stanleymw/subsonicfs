@@ -56,7 +56,7 @@ var _ = (fs.NodeOnAdder)((*subsonicFS)(nil))
 
 func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if song.streamer != nil {
-		return &song, fuse.FOPEN_NONSEEKABLE | fuse.FOPEN_KEEP_CACHE, 0
+		return &song, fuse.FOPEN_NONSEEKABLE, 0
 	}
 
 	stmr, err := SubsonicClient.Stream(song.clientObj.ID, nil)
@@ -68,33 +68,23 @@ func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle
 	song.streamer = stmr
 	song.readLock.Unlock()
 
-	return &song, fuse.FOPEN_NONSEEKABLE | fuse.FOPEN_KEEP_CACHE, 0
+	return &song, fuse.FOPEN_NONSEEKABLE, 0
 }
 
 var last int64
 
 func (song *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	song.readLock.Lock()
+	defer song.readLock.Unlock()
+
 	if song.streamer == nil {
-		song.readLock.Unlock()
 		return nil, syscall.EIO
 	}
 
 	// log.Printf("[read] offset: %d | amt: %d | delta: %d", off, len(dest), off-last)
-	last = off
+	// last = off
 
-	readAmt := min(off+int64(len(dest)), song.clientObj.Size) - off
-
-	var rd int64 = 0
-
-	for rd < readAmt {
-		tmp, _ := song.streamer.Read(dest[rd:readAmt])
-
-		rd += int64(tmp)
-		// log.Printf("+%d -> %d %s", tmp, rd, err)
-	}
-
-	song.readLock.Unlock()
+	io.ReadFull(song.streamer, dest)
 	return fuse.ReadResultData(dest), 0
 }
 func (song *subsonicSong) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
