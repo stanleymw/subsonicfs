@@ -13,9 +13,12 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/dweymouth/go-subsonic/subsonic"
-	"github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/BurntSushi/toml" // TOML config
+	"github.com/adrg/xdg"        // config dir
+
+	"github.com/dweymouth/go-subsonic/subsonic" // subsonic client
+	"github.com/hanwen/go-fuse/v2/fs"           // FUSE api
+	"github.com/hanwen/go-fuse/v2/fuse"         // FUSE constants
 )
 
 var hasher = fnv.New64()
@@ -204,25 +207,55 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) {
 	log.Println("Artists successfully indexed!")
 }
 
-func main() {
-	hostname := flag.String("hostname", "http://127.0.0.1:4533", "Hostname/IP Address of the Subsonic Server")
-	username := flag.String("username", "user", "Username for the account")
-	password := flag.String("password", "user", "Password for the account")
-	mountDir := flag.String("mountDir", "/tmp/x", "Location to mount SubsonicFS")
-	passwordAuth := flag.Bool("passwordAuth", false, "Whether or not to use plain-text password authentication (Default is off as it is insecure)")
+type subsonicConfig struct {
+	Hostname string
+	Username string
+	Password string
+	MountDir string
 
-	flag.Parse()
+	PasswordAuth bool
+}
+
+func main() {
+	var cfg subsonicConfig
+	configFilePath, err := xdg.SearchConfigFile("subsonicfs/config.toml")
+
+	if err != nil {
+		log.Printf("Unable to find configuration file: %s", err)
+		log.Println("Using command line arguments")
+
+		hostname := flag.String("hostname", "http://127.0.0.1:4533", "Hostname/IP Address of the Subsonic Server")
+		username := flag.String("username", "user", "Username for the account")
+		password := flag.String("password", "user", "Password for the account")
+		mountDir := flag.String("mountDir", "/tmp/x", "Location to mount SubsonicFS")
+		passwordAuth := flag.Bool("passwordAuth", false, "Whether or not to use plain-text password authentication (Default is off as it is insecure)")
+
+		flag.Parse()
+
+		cfg.Hostname = *hostname
+		cfg.Username = *username
+		cfg.Password = *password
+		cfg.MountDir = *mountDir
+		cfg.PasswordAuth = *passwordAuth
+	} else {
+		log.Printf("Using configuration file: %s", configFilePath)
+
+		_, err := toml.DecodeFile(configFilePath, &cfg)
+		if err != nil {
+			log.Fatalf("Could not parse config file: %s", err)
+		}
+	}
 
 	SubsonicClient = subsonic.Client{
 		Client:              &http.Client{},
-		BaseUrl:             *hostname,
-		User:                *username,
+		BaseUrl:             cfg.Hostname,
+		User:                cfg.Username,
 		ClientName:          "SubsonicFS",
-		PasswordAuth:        *passwordAuth,
+		PasswordAuth:        cfg.PasswordAuth,
 		RequestedAPIVersion: "1.16.1",
 	}
 
-	err := SubsonicClient.Authenticate(*password)
+	err = SubsonicClient.Authenticate(cfg.Password)
 	if err != nil {
 		log.Fatalf("Authentication failed! Check your username and password\n%s", err)
 		return
@@ -230,12 +263,12 @@ func main() {
 
 	root := &subsonicFS{}
 
-	os.Mkdir(*mountDir, 0755)
+	os.Mkdir(cfg.MountDir, 0755)
 
 	log.Printf("Logged in as: %s", SubsonicClient.User)
 
-	log.Printf("Mounting at %s...", *mountDir)
-	server, err := fs.Mount(*mountDir, root, &fs.Options{
+	log.Printf("Mounting at %s...", cfg.MountDir)
+	server, err := fs.Mount(cfg.MountDir, root, &fs.Options{
 		MountOptions: fuse.MountOptions{Debug: false, SyncRead: true},
 	})
 
