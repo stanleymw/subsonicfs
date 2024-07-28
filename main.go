@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strings"
 	"syscall"
 
 	"github.com/dweymouth/go-subsonic/subsonic"
@@ -152,7 +153,7 @@ func (artist *subsonicArtist) Readdir(ctx context.Context) (fs.DirStream, syscal
 					clientObj: album,
 				},
 				fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(album.ID)})
-			artist.AddChild(fmt.Sprint(album.Name, " (", album.Year, ")"), albumInode, true)
+			artist.AddChild(strings.ReplaceAll(fmt.Sprint(album.Name, " (", album.Year, ")"), "/", ""), albumInode, true)
 		}
 	}
 
