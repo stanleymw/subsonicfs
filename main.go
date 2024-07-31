@@ -5,17 +5,20 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path"
+	"strings"
 	"syscall"
 
-	"stanleymw/subsonicfs/readbuf"
+	"github.com/BurntSushi/toml" // TOML config
+	"github.com/adrg/xdg"        // config dir
 
-	"github.com/dweymouth/go-subsonic/subsonic"
-	"github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/dweymouth/go-subsonic/subsonic" // subsonic client
+	"github.com/hanwen/go-fuse/v2/fs"           // FUSE api
+	"github.com/hanwen/go-fuse/v2/fuse"         // FUSE constants
 )
 
 var hasher = fnv.New64()
@@ -47,7 +50,7 @@ type subsonicSong struct {
 	fs.Inode
 
 	clientObj *subsonic.Child
-	streamer  *readbuf.ReaderBuf
+	streamer  io.Reader
 }
 
 // The root populates the tree in its OnAdd method
@@ -55,7 +58,7 @@ var _ = (fs.NodeOnAdder)((*subsonicFS)(nil))
 
 func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if song.streamer != nil {
-		return &song, fuse.FOPEN_DIRECT_IO, 0
+		return &song, fuse.FOPEN_NONSEEKABLE, 0
 	}
 
 	stmr, err := SubsonicClient.Stream(song.clientObj.ID, nil)
@@ -63,20 +66,23 @@ func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle
 		return nil, 0, syscall.ENOENT
 	}
 
-	song.streamer = readbuf.NewReaderBuf(&stmr, song.clientObj.Size)
-	return &song, fuse.FOPEN_DIRECT_IO, 0
+	song.streamer = stmr
+	return &song, fuse.FOPEN_NONSEEKABLE, 0
 }
 
+var last int64
+
 func (song *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	readStart := off
-	readEnd := min(off+int64(len(dest)), int64(len(*song.streamer.InternalCache)))
+	if song.streamer == nil {
+		return nil, syscall.EIO
+	}
 
-	song.streamer.EnsureCached(readStart, readEnd)
-
-	return fuse.ReadResultData((*song.streamer.InternalCache)[readStart:readEnd]), 0
+	io.ReadFull(song.streamer, dest)
+	return fuse.ReadResultData(dest), 0
 }
 func (song *subsonicSong) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 	song.streamer = nil
+
 	return 0
 }
 func (song *subsonicSong) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -150,7 +156,7 @@ func (artist *subsonicArtist) Readdir(ctx context.Context) (fs.DirStream, syscal
 					clientObj: album,
 				},
 				fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(album.ID)})
-			artist.AddChild(fmt.Sprint(album.Name, " (", album.Year, ")"), albumInode, true)
+			artist.AddChild(strings.ReplaceAll(fmt.Sprint(album.Name, " (", album.Year, ")"), "/", ""), albumInode, true)
 		}
 	}
 
@@ -201,25 +207,55 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) {
 	log.Println("Artists successfully indexed!")
 }
 
-func main() {
-	hostname := flag.String("hostname", "http://127.0.0.1:4533", "Hostname/IP Address of the Subsonic Server")
-	username := flag.String("username", "user", "Username for the account")
-	password := flag.String("password", "user", "Password for the account")
-	mountDir := flag.String("mountDir", "/tmp/SubsonicFS", "Location to mount SubsonicFS")
-	passwordAuth := flag.Bool("passwordAuth", false, "Whether or not to use plain-text password authentication (Default is off as it is insecure)")
+type subsonicConfig struct {
+	Hostname string
+	Username string
+	Password string
+	MountDir string
 
-	flag.Parse()
+	PasswordAuth bool
+}
+
+func main() {
+	var cfg subsonicConfig
+	configFilePath, err := xdg.SearchConfigFile("subsonicfs/config.toml")
+
+	if err != nil {
+		log.Printf("Unable to find configuration file: %s", err)
+		log.Println("Using command line arguments")
+
+		hostname := flag.String("hostname", "http://127.0.0.1:4533", "Hostname/IP Address of the Subsonic Server")
+		username := flag.String("username", "user", "Username for the account")
+		password := flag.String("password", "user", "Password for the account")
+		mountDir := flag.String("mountDir", "/tmp/x", "Location to mount SubsonicFS")
+		passwordAuth := flag.Bool("passwordAuth", false, "Whether or not to use plain-text password authentication (Default is off as it is insecure)")
+
+		flag.Parse()
+
+		cfg.Hostname = *hostname
+		cfg.Username = *username
+		cfg.Password = *password
+		cfg.MountDir = *mountDir
+		cfg.PasswordAuth = *passwordAuth
+	} else {
+		log.Printf("Using configuration file: %s", configFilePath)
+
+		_, err := toml.DecodeFile(configFilePath, &cfg)
+		if err != nil {
+			log.Fatalf("Could not parse config file: %s", err)
+		}
+	}
 
 	SubsonicClient = subsonic.Client{
 		Client:              &http.Client{},
-		BaseUrl:             *hostname,
-		User:                *username,
+		BaseUrl:             cfg.Hostname,
+		User:                cfg.Username,
 		ClientName:          "SubsonicFS",
-		PasswordAuth:        *passwordAuth,
+		PasswordAuth:        cfg.PasswordAuth,
 		RequestedAPIVersion: "1.16.1",
 	}
 
-	err := SubsonicClient.Authenticate(*password)
+	err = SubsonicClient.Authenticate(cfg.Password)
 	if err != nil {
 		log.Fatalf("Authentication failed! Check your username and password\n%s", err)
 		return
@@ -227,13 +263,13 @@ func main() {
 
 	root := &subsonicFS{}
 
-	os.Mkdir(*mountDir, 0755)
+	os.Mkdir(cfg.MountDir, 0755)
 
 	log.Printf("Logged in as: %s", SubsonicClient.User)
 
-	log.Printf("Mounting at %s...", *mountDir)
-	server, err := fs.Mount(*mountDir, root, &fs.Options{
-		MountOptions: fuse.MountOptions{Debug: false},
+	log.Printf("Mounting at %s...", cfg.MountDir)
+	server, err := fs.Mount(cfg.MountDir, root, &fs.Options{
+		MountOptions: fuse.MountOptions{Debug: false, SyncRead: true},
 	})
 
 	if err != nil {
