@@ -1,4 +1,4 @@
-module stanleymw/subsonicfs
+module github.com/stanleymw/subsonicfs
 
 go 1.22.2
 
