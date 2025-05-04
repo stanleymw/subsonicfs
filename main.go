@@ -13,7 +13,7 @@ import (
 
 	"stanleymw/subsonicfs/readbuf"
 
-	"github.com/dweymouth/go-subsonic/subsonic"
+	"github.com/supersonic-app/go-subsonic/subsonic"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
