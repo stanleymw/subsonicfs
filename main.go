@@ -13,9 +13,9 @@ import (
 
 	"stanleymw/subsonicfs/readbuf"
 
-	"github.com/supersonic-app/go-subsonic/subsonic"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/supersonic-app/go-subsonic/subsonic"
 )
 
 var hasher = fnv.New64()
@@ -63,7 +63,7 @@ func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle
 		return nil, 0, syscall.ENOENT
 	}
 
-	song.streamer = readbuf.NewReaderBuf(&stmr, song.clientObj.Size)
+	song.streamer = readbuf.NewReaderBuf(stmr, song.clientObj.Size)
 	return &song, fuse.FOPEN_DIRECT_IO, 0
 }
 

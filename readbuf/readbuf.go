@@ -5,17 +5,17 @@ import (
 )
 
 type ReaderBuf struct {
-	Reader *io.Reader
+	Reader io.Reader
 
 	InternalCache *[]byte
 	ReadPosition  int64
 }
 
-func NewReaderBufWithPreallocatedCache(ir *io.Reader, cache *[]byte) *ReaderBuf {
+func NewReaderBufWithPreallocatedCache(ir io.Reader, cache *[]byte) *ReaderBuf {
 	return &ReaderBuf{Reader: ir, InternalCache: cache, ReadPosition: 0}
 }
 
-func NewReaderBuf(ir *io.Reader, cacheSize int64) *ReaderBuf {
+func NewReaderBuf(ir io.Reader, cacheSize int64) *ReaderBuf {
 	// var cache [cacheSize]byte
 	cache := make([]byte, cacheSize) // len(a)=5
 	return &ReaderBuf{Reader: ir, InternalCache: &cache, ReadPosition: 0}
@@ -32,7 +32,7 @@ func (rb *ReaderBuf) EnsureCached(readStart int64, readEnd int64) (n int, err er
 		// cache up all the way to where we want
 		var amt int
 		for rb.ReadPosition < readEnd {
-			temp_amt, _ := (*rb.Reader).Read((*rb.InternalCache)[rb.ReadPosition:readEnd])
+			temp_amt, _ := (rb.Reader).Read((*rb.InternalCache)[rb.ReadPosition:readEnd])
 
 			amt += temp_amt
 			rb.ReadPosition += int64(temp_amt)
@@ -60,7 +60,7 @@ func (rb *ReaderBuf) ReadAt(p *[]byte, off int64) (n int, err error) {
 		// not cached AT ALL
 
 		// cache up all the way to where we want
-		amt, err := (*rb.Reader).Read((*rb.InternalCache)[rb.ReadPosition:readEnd])
+		amt, err := (rb.Reader).Read((*rb.InternalCache)[rb.ReadPosition:readEnd])
 		rb.ReadPosition += int64(amt)
 
 		if err != nil {
@@ -74,7 +74,7 @@ func (rb *ReaderBuf) ReadAt(p *[]byte, off int64) (n int, err error) {
 		// (partially?) already cached
 		if readEnd > rb.ReadPosition {
 			// just cache up to the end
-			amt, err := (*rb.Reader).Read((*rb.InternalCache)[rb.ReadPosition:readEnd])
+			amt, err := (rb.Reader).Read((*rb.InternalCache)[rb.ReadPosition:readEnd])
 			rb.ReadPosition += int64(amt)
 
 			if err != nil {
