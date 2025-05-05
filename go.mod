@@ -6,7 +6,7 @@ toolchain go1.24.2
 
 require (
 	github.com/hanwen/go-fuse/v2 v2.7.2
-	github.com/supersonic-app/go-subsonic v0.0.0-20241224013245-9b2841f3711d
+	github.com/stanleymw/go-subsonic v0.1.0
 )
 
 require (

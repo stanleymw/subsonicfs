@@ -5,17 +5,17 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path"
 	"syscall"
 
-	"stanleymw/subsonicfs/readbuf"
-
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/supersonic-app/go-subsonic/subsonic"
+
+	"github.com/stanleymw/go-subsonic/subsonic"
 )
 
 var hasher = fnv.New64()
@@ -34,51 +34,60 @@ type subsonicFS struct {
 type subsonicArtist struct {
 	fs.Inode
 
-	clientObj *subsonic.ArtistID3
+	clientObj subsonic.ArtistID3
 }
 
 type subsonicAlbum struct {
 	fs.Inode
 
-	clientObj *subsonic.AlbumID3
+	clientObj subsonic.AlbumID3
 }
 
 type subsonicSong struct {
 	fs.Inode
 
-	clientObj *subsonic.Child
-	streamer  *readbuf.ReaderBuf
+	clientObj subsonic.Child
 }
 
 // The root populates the tree in its OnAdd method
 var _ = (fs.NodeOnAdder)((*subsonicFS)(nil))
 
 func (song *subsonicSong) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	if song.streamer != nil {
-		return &song, fuse.FOPEN_DIRECT_IO, 0
-	}
+	// if song.streamer != nil {
+	// 	return &song, fuse.FOPEN_DIRECT_IO, 0
+	// }
 
-	stmr, err := SubsonicClient.Stream(song.clientObj.ID, nil)
-	if err != nil {
-		return nil, 0, syscall.ENOENT
-	}
+	// stmr, err := SubsonicClient.Stream(song.clientObj.ID, nil)
+	// if err != nil {
+	// 	return nil, 0, syscall.ENOENT
+	// }
 
-	song.streamer = readbuf.NewReaderBuf(stmr, song.clientObj.Size)
-	return &song, fuse.FOPEN_DIRECT_IO, 0
+	// song.streamer = readbuf.NewReaderBuf(stmr, song.clientObj.Size)
+	return song, fuse.FOPEN_KEEP_CACHE, 0
 }
 
 func (song *subsonicSong) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	readStart := off
-	readEnd := min(off+int64(len(dest)), int64(len(*song.streamer.InternalCache)))
+	readEnd := off + int64(len(dest))
 
-	song.streamer.EnsureCached(readStart, readEnd)
+	body, err := SubsonicClient.StreamRange(song.clientObj.ID, nil, readStart, readEnd)
+	if err != nil {
+		return nil, syscall.ENOENT
+	}
 
-	return fuse.ReadResultData((*song.streamer.InternalCache)[readStart:readEnd]), 0
+	amt, err := io.ReadAtLeast(body, dest, len(dest))
+
+	if err != nil {
+		// if err == io.EOF {
+		// 	return fuse.ReadResultData(nil), 0
+		// }
+	}
+
+	log.Printf("Read %d bytes from %d -> %d! | %v", amt, readStart, readEnd, err)
+
+	return fuse.ReadResultData(dest[:amt]), 0
 }
-func (song *subsonicSong) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
-	song.streamer = nil
-	return 0
-}
+
 func (song *subsonicSong) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	sobj := song.clientObj
 
@@ -115,7 +124,7 @@ func (album *subsonicAlbum) Readdir(ctx context.Context) (fs.DirStream, syscall.
 			songIno := album.Inode.NewPersistentInode(
 				ctx,
 				&subsonicSong{
-					clientObj: song,
+					clientObj: *song,
 				},
 				fs.StableAttr{Mode: syscall.S_IFREG, Ino: hash(song.ID)},
 			)
@@ -147,7 +156,7 @@ func (artist *subsonicArtist) Readdir(ctx context.Context) (fs.DirStream, syscal
 			albumInode := artist.NewPersistentInode(
 				ctx,
 				&subsonicAlbum{
-					clientObj: album,
+					clientObj: *album,
 				},
 				fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(album.ID)})
 			artist.AddChild(fmt.Sprint(album.Name, " (", album.Year, ")"), albumInode, true)
@@ -192,7 +201,7 @@ func (sr *subsonicFS) OnAdd(ctx context.Context) {
 			artistInode := p.NewPersistentInode(
 				ctx,
 				&subsonicArtist{
-					clientObj: artist,
+					clientObj: *artist,
 				},
 				fs.StableAttr{Mode: fuse.S_IFDIR, Ino: hash(artist.ID)})
 			p.AddChild(artist.Name, artistInode, true)
@@ -233,7 +242,7 @@ func main() {
 
 	log.Printf("Mounting at %s...", *mountDir)
 	server, err := fs.Mount(*mountDir, root, &fs.Options{
-		MountOptions: fuse.MountOptions{Debug: false},
+		MountOptions: fuse.MountOptions{Debug: false, SyncRead: false},
 	})
 
 	if err != nil {
